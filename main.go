@@ -68,94 +68,42 @@ func readKexInit(conn io.Reader) (msg msgKexInit, err error) {
 		return msgKexInit{}, fmt.Errorf("read packet: %w", err)
 	}
 
-	r := bytes.NewReader(packet)
+	r := NewReader(bytes.NewReader(packet))
 
-	kexInit, err := readByte(r)
-	if err != nil {
-		return msgKexInit{}, err
-	}
+	kexInit := r.readByte()
 	log.Println("read kexinit:", kexInit)
 
 	// cookie
-	err = discard(r, 16)
-	if err != nil {
-		return msgKexInit{}, err
-	}
+	r.discard(16)
 
-	msg.kexAlgorithms, err = readNameList(r)
-	if err != nil {
-		return msgKexInit{}, err
-	}
-
-	msg.serverHostKeyAlgorithms, err = readNameList(r)
-	if err != nil {
-		return msgKexInit{}, err
-	}
-
-	msg.encryptionAlgorithmsCtoS, err = readNameList(r)
-	if err != nil {
-		return msgKexInit{}, err
-	}
-
-	msg.encryptionAlgorithmsStoC, err = readNameList(r)
-	if err != nil {
-		return msgKexInit{}, err
-	}
-
-	msg.macAlgorithmsCtoS, err = readNameList(r)
-	if err != nil {
-		return msgKexInit{}, err
-	}
-
-	msg.macAlgorithmsStoC, err = readNameList(r)
-	if err != nil {
-		return msgKexInit{}, err
-	}
-
-	msg.compressionAlgorithmsCtoS, err = readNameList(r)
-	if err != nil {
-		return msgKexInit{}, err
-	}
-
-	msg.compressionAlgorithmsStoC, err = readNameList(r)
-	if err != nil {
-		return msgKexInit{}, err
-	}
-
-	msg.languagesCtoS, err = readNameList(r)
-	if err != nil {
-		return msgKexInit{}, err
-	}
-
-	msg.languagesStoC, err = readNameList(r)
-	if err != nil {
-		return msgKexInit{}, err
-	}
-
-	msg.firstKexPacketFollows, err = readBoolean(r)
-	if err != nil {
-		return msgKexInit{}, err
-	}
+	msg.kexAlgorithms = r.readNameList()
+	msg.serverHostKeyAlgorithms = r.readNameList()
+	msg.encryptionAlgorithmsCtoS = r.readNameList()
+	msg.encryptionAlgorithmsStoC = r.readNameList()
+	msg.macAlgorithmsCtoS = r.readNameList()
+	msg.macAlgorithmsStoC = r.readNameList()
+	msg.compressionAlgorithmsCtoS = r.readNameList()
+	msg.compressionAlgorithmsStoC = r.readNameList()
+	msg.languagesCtoS = r.readNameList()
+	msg.languagesStoC = r.readNameList()
+	msg.firstKexPacketFollows = r.readBoolean()
 
 	// future extension
-	err = discard(r, 4)
-	if err != nil {
-		return msgKexInit{}, err
+	r.discard(4)
+
+	if err := r.Err(); err != nil {
+		return msg, err
 	}
 
 	return msg, nil
 }
 
-func readPacket(r io.Reader) ([]byte, error) {
-	packetLength, err := readUint32(r)
-	if err != nil {
-		return nil, err
-	}
+func readPacket(conn io.Reader) ([]byte, error) {
+	r := NewReader(conn)
 
-	paddingLengthRaw, err := readByte(r)
-	if err != nil {
-		return nil, err
-	}
+	packetLength := r.readUint32()
+
+	paddingLengthRaw := r.readByte()
 	paddingLength := uint32(paddingLengthRaw)
 
 	if (4+1+packetLength+paddingLength)%8 != 0 {
@@ -163,98 +111,14 @@ func readPacket(r io.Reader) ([]byte, error) {
 		return nil, errors.New("packet length before MAC must be divisible by 8")
 	}
 
-	payload, err := readBytes(r, packetLength-paddingLength-1)
-	if err != nil {
+	payload := r.readBytes(packetLength - paddingLength - 1)
+
+	r.discard(paddingLength)
+
+	if err := r.Err(); err != nil {
 		return nil, err
 	}
-
-	err = discard(r, paddingLength)
-	if err != nil {
-		return nil, err
-	}
-
 	log.Printf("received packet of length %d (plus %d of padding)", packetLength, paddingLength)
 
 	return payload, nil
-}
-
-func discard(r io.Reader, n uint32) error {
-	_, err := io.CopyN(io.Discard, r, int64(n))
-	return err
-}
-
-func readUint32(r io.Reader) (uint32, error) {
-	raw := make([]byte, 4)
-	_, err := r.Read(raw)
-	if err != nil {
-		return 0, err
-	}
-
-	v := uint32(raw[0])<<24 |
-		uint32(raw[1])<<16 |
-		uint32(raw[2])<<8 |
-		uint32(raw[3])
-	return v, nil
-}
-
-func readByte(r io.Reader) (byte, error) {
-	raw := make([]byte, 1)
-	_, err := r.Read(raw)
-	if err != nil {
-		return 0, err
-	}
-
-	return raw[0], nil
-}
-
-func readBytes(r io.Reader, len uint32) ([]byte, error) {
-	raw := make([]byte, len)
-	_, err := r.Read(raw)
-	if err != nil {
-		return nil, err
-	}
-
-	return raw, nil
-}
-
-func readNameList(r io.Reader) ([]string, error) {
-	length, err := readUint32(r)
-	if err != nil {
-		return nil, err
-	}
-
-	raw, err := readBytes(r, length)
-	split := strings.Split(string(raw), ",")
-
-	return split, nil
-}
-
-func readBoolean(r io.Reader) (bool, error) {
-	b, err := readByte(r)
-	if err != nil {
-		return false, err
-	}
-
-	return b != 0, nil
-}
-
-func readUntil(r io.Reader, delim byte) ([]byte, error) {
-	buf := bytes.Buffer{}
-
-	s := make([]byte, 1)
-	_, err := r.Read(s)
-	if err != nil {
-		return nil, err
-	}
-
-	for s[0] != delim {
-		buf.Write(s)
-
-		_, err := r.Read(s)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return buf.Bytes(), nil
 }

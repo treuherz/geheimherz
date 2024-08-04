@@ -80,6 +80,14 @@ func (r *reader) discard(n uint32) {
 	}
 }
 
+func (r *reader) readString() []byte {
+	length := r.readUint32()
+
+	b := r.readBytes(length)
+
+	return b
+}
+
 func readUntil(r io.Reader, delim byte) ([]byte, error) {
 	buf := bytes.Buffer{}
 

@@ -2,6 +2,8 @@ package main
 
 import (
 	"io"
+	"math/big"
+	"slices"
 	"strings"
 )
 
@@ -47,6 +49,11 @@ func (w *writer) writeByte(v byte) {
 	_ = w.write(raw)
 }
 
+func (w *writer) writeByteString(v []byte) {
+	w.writeUint32(uint32(len(v)))
+	w.writeBytes(v)
+}
+
 func (w *writer) writeBytes(v []byte) {
 	_ = w.write(v)
 }
@@ -64,6 +71,47 @@ func (w *writer) writeBoolean(v bool) {
 		b = 1
 	}
 	w.writeByte(b)
+}
+
+func (w *writer) writeString(v []byte) {
+	w.writeUint32(uint32(len(v)))
+	w.writeBytes(v)
+}
+
+func (w *writer) writeMpint(v *big.Int) {
+	buf := v.Bytes()
+
+	if len(buf) > 0 {
+		if v.Sign() == -1 {
+			// Two's complement
+			carry := true
+			for i := len(buf) - 1; i >= 0; i-- {
+				b := buf[i]
+				b = ^b
+
+				if carry {
+					b++
+				}
+				if b != 0 {
+					carry = false
+				}
+
+				buf[i] = b
+			}
+
+			// if MSB of first byte is not 1, add 255 padding byte at beginning.
+			if buf[0]>>7 != 1 {
+				buf = slices.Insert(buf, 0, 255)
+			}
+		} else {
+			// if MSB of first byte is set, add zero padding byte at beginning.
+			if buf[0]>>7 == 1 {
+				buf = slices.Insert(buf, 0, 0)
+			}
+		}
+	}
+
+	w.writeString(buf)
 }
 
 func (w *writer) copyN(r io.Reader, n int64) {

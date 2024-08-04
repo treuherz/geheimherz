@@ -1,4 +1,4 @@
-package main
+package ssh
 
 import (
 	"bytes"
@@ -12,15 +12,6 @@ import (
 	"os"
 	"strings"
 )
-
-func main() {
-	addr := ":22"
-	if len(os.Args) > 1 {
-		addr = os.Args[1]
-	}
-
-	fmt.Println(connect(addr))
-}
 
 type MessageID uint8
 
@@ -61,15 +52,9 @@ const (
 	MessageKexECDHReply MessageID = 31
 )
 
-func connect(addr string) error {
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("dial: %w", err)
-	}
-	log.Printf("%s <-> %s", conn.LocalAddr(), conn.RemoteAddr())
-
-	clientID := "SSH-2.0-gossh_1.0b"
-	_, err = conn.Write([]byte(clientID + "\r\n"))
+func Handshake(conn net.Conn) error {
+	clientID := "SSH-2.0-geheimherz_0"
+	_, err := conn.Write([]byte(clientID + "\r\n"))
 	if err != nil {
 		return fmt.Errorf("send id: %w", err)
 	}
@@ -235,7 +220,7 @@ func readECDHKexReply(conn io.Reader) (msg msgECDHKexReply, err error) {
 
 	msg.K_S = r.readString()
 	msg.Q_S = r.readString()
-	msg.signature = r.readString
+	msg.signature = r.readString()
 
 	return msg, r.Err()
 }

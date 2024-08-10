@@ -3,13 +3,15 @@ package ssh
 import (
 	"bytes"
 	"crypto/ecdh"
+	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net"
-	"os"
 	"strings"
 )
 
@@ -52,7 +54,7 @@ const (
 	MessageKexECDHReply MessageID = 31
 )
 
-func Handshake(conn net.Conn) error {
+func Handshake(conn net.Conn, serverKey ed25519.PublicKey) error {
 	clientID := "SSH-2.0-geheimherz_0"
 	_, err := conn.Write([]byte(clientID + "\r\n"))
 	if err != nil {
@@ -63,10 +65,14 @@ func Handshake(conn net.Conn) error {
 	if err != nil {
 		return fmt.Errorf("recv id: %w", err)
 	}
-	serverID := string(serverIDBytes)
+	serverID := strings.TrimSpace(string(serverIDBytes))
 	log.Println("recv ID:", strings.TrimSuffix(serverID, "\r"))
 
-	serverKexInit, err := readKexInit(conn)
+	serverKexInitPacket, err := readPacket(conn)
+	if err != nil {
+		return fmt.Errorf("recv kexinit: %w", err)
+	}
+	serverKexInit, err := decodeKexInit(serverKexInitPacket)
 	if err != nil {
 		return fmt.Errorf("recv kexinint: %w", err)
 	}
@@ -75,7 +81,8 @@ func Handshake(conn net.Conn) error {
 
 	clientKexInit := buildClientKexInit()
 	log.Printf("send kexinit %#v", clientKexInit)
-	err = writeKexInit(conn, clientKexInit)
+	clientKexInitPacket := encodeKexInit(clientKexInit)
+	err = writePacket(conn, clientKexInitPacket)
 	if err != nil {
 		return fmt.Errorf("send client kexinint: %w", err)
 	}
@@ -89,39 +96,90 @@ func Handshake(conn net.Conn) error {
 	if err != nil {
 		return fmt.Errorf("build ECDH kexinint: %w", err)
 	}
+
 	log.Printf("send ECDH kexinit %#v", ecdhKexInit)
-	err = writeECDHKexInit(conn, ecdhKexInit)
+	err = writePacket(conn, encodeECDHKexInit(ecdhKexInit))
 	if err != nil {
 		return fmt.Errorf("send ECDH kexinint: %w", err)
 	}
 
-	ecdhKexReply, err := readECDHKexReply(conn)
+	ecdhKexReplyPacket, err := readPacket(conn)
 	if err != nil {
 		return fmt.Errorf("recv ecdh kex reply: %w", err)
 	}
 
-	// TODO: check host key
+	ecdhKexReply, err := decodeECDHKexReply(ecdhKexReplyPacket)
+	if err != nil {
+		return fmt.Errorf("decode kex reply: %w", err)
+	}
+
+	serverSentKey, err := decodeEd25519Key(bytes.NewReader(ecdhKexReply.K_S))
+	if err != nil {
+		return errors.New("decode server public key")
+	}
+
+	if !serverKey.Equal(serverSentKey) {
+		return errors.New("server public key not recognised")
+	}
+
 	sharedSecret, err := computeSharedSecret(key, ecdhKexReply)
 	if err != nil {
 		return fmt.Errorf("compute shared secret: %w", err)
 	}
 
-	if err := verifySignature(ecdhKexReply, clientID, serverID, clientKexInit, serverKexInit, key, sharedSecret); err != nil {
+	if err := verifySignature(
+		serverKey,
+		ecdhKexReply,
+		clientID,
+		serverID,
+		clientKexInitPacket,
+		serverKexInitPacket,
+		key,
+		sharedSecret,
+	); err != nil {
 		return fmt.Errorf("compute shared secret: %w", err)
 	}
 
-	_, err = io.Copy(os.Stderr, conn)
-	return err
+	log.Print("signature verified, shared key computed")
+
+	conn.Close()
+	return nil
 }
 
 func verifySignature(
+	serverKey ed25519.PublicKey,
 	reply msgECDHKexReply,
 	clientID, serverID string,
-	clientKexInit, serverKexInit msgKexInit,
-	key *ecdh.PrivateKey,
+	clientKexInit, serverKexInit []byte,
+	clientKey *ecdh.PrivateKey,
 	sharedSecret []byte,
 ) error {
-	// TODO
+	buf := &bytes.Buffer{}
+	w := NewWriter(buf)
+
+	w.writeString([]byte(clientID))
+	w.writeString([]byte(serverID))
+	w.writeString(clientKexInit)
+	w.writeString(serverKexInit)
+	w.writeString(reply.K_S)
+	w.writeString(clientKey.PublicKey().Bytes())
+	w.writeString(reply.Q_S)
+	w.writeMpint(new(big.Int).SetBytes(sharedSecret))
+
+	if err := w.Err(); err != nil {
+		return fmt.Errorf("build exchange hash: %w", err)
+	}
+
+	exchangeHash := sha256.Sum256(buf.Bytes())
+
+	serverSig, err := decodeEd25519Sig(bytes.NewReader(reply.signature))
+	if err != nil {
+		return fmt.Errorf("decode server-sent signature: %w", err)
+	}
+
+	if !ed25519.Verify(serverKey, exchangeHash[:], serverSig) {
+		return errors.New("couldn't verify signature")
+	}
 
 	return nil
 }
@@ -171,12 +229,7 @@ type msgKexInit struct {
 	firstKexPacketFollows     bool
 }
 
-func readKexInit(conn io.Reader) (msg msgKexInit, err error) {
-	packet, err := readPacket(conn)
-	if err != nil {
-		return msgKexInit{}, fmt.Errorf("read packet: %w", err)
-	}
-
+func decodeKexInit(packet []byte) (msg msgKexInit, err error) {
 	r := NewReader(bytes.NewReader(packet))
 
 	id := MessageID(r.readByte())
@@ -205,11 +258,8 @@ func readKexInit(conn io.Reader) (msg msgKexInit, err error) {
 	return msg, r.Err()
 }
 
-func readECDHKexReply(conn io.Reader) (msg msgECDHKexReply, err error) {
-	packet, err := readPacket(conn)
-	if err != nil {
-		return msgECDHKexReply{}, fmt.Errorf("read packet: %w", err)
-	}
+func decodeECDHKexReply(packet []byte) (msgECDHKexReply, error) {
+	var msg msgECDHKexReply
 
 	r := NewReader(bytes.NewReader(packet))
 
@@ -225,7 +275,7 @@ func readECDHKexReply(conn io.Reader) (msg msgECDHKexReply, err error) {
 	return msg, r.Err()
 }
 
-func writeKexInit(conn io.Writer, msg msgKexInit) error {
+func encodeKexInit(msg msgKexInit) []byte {
 	buf := &bytes.Buffer{}
 	w := NewWriter(buf)
 
@@ -248,8 +298,8 @@ func writeKexInit(conn io.Writer, msg msgKexInit) error {
 
 	// future extension
 	w.writeUint32(0)
-
-	return writePacket(conn, buf.Bytes())
+	payload := buf.Bytes()
+	return payload
 }
 
 type msgECDHKexInit struct {
@@ -262,14 +312,37 @@ type msgECDHKexReply struct {
 	signature []byte
 }
 
-func writeECDHKexInit(conn io.Writer, msg msgECDHKexInit) error {
+func encodeECDHKexInit(msg msgECDHKexInit) []byte {
 	buf := &bytes.Buffer{}
 	w := NewWriter(buf)
 
 	w.writeByte(byte(MessageKexECDHInit))
 	w.writeString(msg.Q_C)
 
-	return writePacket(conn, buf.Bytes())
+	payload := buf.Bytes()
+	return payload
+}
+
+func decodeEd25519Key(r io.Reader) (ed25519.PublicKey, error) {
+	rr := NewReader(r)
+	prefix := rr.readString()
+	if !bytes.Equal(prefix, []byte("ssh-ed25519")) {
+		return nil, errors.New("wrong prefix")
+	}
+
+	k := rr.readString()
+	return k, nil
+}
+
+func decodeEd25519Sig(r io.Reader) ([]byte, error) {
+	rr := NewReader(r)
+	prefix := rr.readString()
+	if !bytes.Equal(prefix, []byte("ssh-ed25519")) {
+		return nil, errors.New("wrong prefix")
+	}
+
+	sig := rr.readString()
+	return sig, nil
 }
 
 func readPacket(conn io.Reader) ([]byte, error) {

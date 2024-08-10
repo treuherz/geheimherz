@@ -19,8 +19,8 @@ func main() {
 		slog.Error(err.Error())
 		os.Exit(1)
 	}
-	
-	if err = ssh.Handshake(conn); err != nil {
+
+	if err = ssh.Handshake(conn, nil); err != nil {
 		slog.Error(err.Error())
 		os.Exit(1)
 	}

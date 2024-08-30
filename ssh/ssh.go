@@ -12,6 +12,8 @@ import (
 	"log"
 	"math/big"
 	"net"
+	"reflect"
+	"strconv"
 	"strings"
 )
 
@@ -200,62 +202,101 @@ func buildECDHKexInit(key *ecdh.PublicKey) (msgECDHKexInit, error) {
 }
 
 func buildClientKexInit() msgKexInit {
-	return msgKexInit{
-		kexAlgorithms:             []string{"curve25519-sha256"},
-		serverHostKeyAlgorithms:   []string{"ssh-ed25519"},
-		encryptionAlgorithmsCtoS:  []string{"aes256-ctr"},
-		encryptionAlgorithmsStoC:  []string{"aes256-ctr"},
-		macAlgorithmsCtoS:         []string{"hmac-sha2-256"},
-		macAlgorithmsStoC:         []string{"hmac-sha2-256"},
-		compressionAlgorithmsCtoS: []string{"none"},
-		compressionAlgorithmsStoC: []string{"none"},
-		languagesCtoS:             []string{},
-		languagesStoC:             []string{},
-		firstKexPacketFollows:     false,
+	msg := msgKexInit{
+		Cookie:                [16]byte{},
+		KexAlgs:               []string{"curve25519-sha256"},
+		ServerHostKeyAlgs:     []string{"ssh-ed25519"},
+		EncryptionAlgsCtoS:    []string{"aes256-ctr"},
+		EncryptionAlgsStoC:    []string{"aes256-ctr"},
+		MacAlgsCtoS:           []string{"hmac-sha2-256"},
+		MacAlgsStoC:           []string{"hmac-sha2-256"},
+		CompressionAlgsCtoS:   []string{"none"},
+		CompressionAlgsStoC:   []string{"none"},
+		LanguagesCtoS:         []string{},
+		LanguagesStoC:         []string{},
+		FirstKexPacketFollows: false,
 	}
+
+	rand.Read(msg.Cookie[:])
+	return msg
 }
 
 type msgKexInit struct {
-	kexAlgorithms             []string
-	serverHostKeyAlgorithms   []string
-	encryptionAlgorithmsCtoS  []string
-	encryptionAlgorithmsStoC  []string
-	macAlgorithmsCtoS         []string
-	macAlgorithmsStoC         []string
-	compressionAlgorithmsCtoS []string
-	compressionAlgorithmsStoC []string
-	languagesCtoS             []string
-	languagesStoC             []string
-	firstKexPacketFollows     bool
+	ID                    MessageID `ssh:"20"`
+	Cookie                [16]byte
+	KexAlgs               []string
+	ServerHostKeyAlgs     []string
+	EncryptionAlgsCtoS    []string
+	EncryptionAlgsStoC    []string
+	MacAlgsCtoS           []string
+	MacAlgsStoC           []string
+	CompressionAlgsCtoS   []string
+	CompressionAlgsStoC   []string
+	LanguagesCtoS         []string
+	LanguagesStoC         []string
+	FirstKexPacketFollows bool
+	Reserved              uint32
+}
+
+func scanPacket(r reader, msg any) error {
+	typ := reflect.TypeOf(msg)
+	if typ.Kind() != reflect.Ptr {
+		return errors.New("msg must be a pointer")
+	}
+	if typ.Elem().Kind() != reflect.Struct {
+		return errors.New("msg must be a pointer to a struct")
+	}
+
+	val := reflect.ValueOf(msg).Elem()
+	for i := range val.NumField() {
+		field := val.Field(i)
+		if i == 0 {
+			tag := typ.Elem().Field(i).Tag.Get("ssh")
+			if tag == "" {
+				return errors.New("no ssh tag found on field 0")
+			}
+			wantID, err := strconv.Atoi(tag)
+			if err != nil {
+				return errors.New("ssh tag must be a number")
+			}
+
+			if gotID := r.readByte(); gotID != byte(wantID) {
+				return fmt.Errorf("wrong message ID: %d", gotID)
+			}
+
+			continue
+		}
+
+		switch field.Kind() {
+		case reflect.Uint8:
+			field.SetUint(uint64(r.readByte()))
+		case reflect.Array:
+			r.read(field.Slice(0, field.Len()).Bytes())
+		case reflect.Slice:
+			switch field.Type().Elem().Kind() {
+			case reflect.Uint8:
+				field.SetBytes(r.readString())
+			case reflect.String:
+				field.Set(reflect.ValueOf(r.readNameList()))
+			default:
+				return errors.New("unsupported slice type")
+			}
+		case reflect.Uint32:
+			field.SetUint(uint64(r.readUint32()))
+		case reflect.Uint64:
+			field.SetUint(uint64(r.readUint64()))
+		case reflect.Bool:
+			field.SetBool(r.readBoolean())
+		}
+	}
+
+	return r.Err()
 }
 
 func decodeKexInit(packet []byte) (msg msgKexInit, err error) {
 	r := NewReader(bytes.NewReader(packet))
-
-	id := MessageID(r.readByte())
-	if id != MessageKexinit {
-		return msgKexInit{}, fmt.Errorf("wrong message ID: %d", id)
-	}
-
-	// cookie
-	r.discard(16)
-
-	msg.kexAlgorithms = r.readNameList()
-	msg.serverHostKeyAlgorithms = r.readNameList()
-	msg.encryptionAlgorithmsCtoS = r.readNameList()
-	msg.encryptionAlgorithmsStoC = r.readNameList()
-	msg.macAlgorithmsCtoS = r.readNameList()
-	msg.macAlgorithmsStoC = r.readNameList()
-	msg.compressionAlgorithmsCtoS = r.readNameList()
-	msg.compressionAlgorithmsStoC = r.readNameList()
-	msg.languagesCtoS = r.readNameList()
-	msg.languagesStoC = r.readNameList()
-	msg.firstKexPacketFollows = r.readBoolean()
-
-	// future extension
-	r.discard(4)
-
-	return msg, r.Err()
+	err = scanPacket(r, &msg)
+	return msg, err
 }
 
 func decodeECDHKexReply(packet []byte) (msgECDHKexReply, error) {
@@ -281,20 +322,18 @@ func encodeKexInit(msg msgKexInit) []byte {
 
 	w.writeByte(byte(MessageKexinit))
 
-	// cookie
-	w.copyN(rand.Reader, 16)
-
-	w.writeNameList(msg.kexAlgorithms)
-	w.writeNameList(msg.serverHostKeyAlgorithms)
-	w.writeNameList(msg.encryptionAlgorithmsCtoS)
-	w.writeNameList(msg.encryptionAlgorithmsStoC)
-	w.writeNameList(msg.macAlgorithmsCtoS)
-	w.writeNameList(msg.macAlgorithmsStoC)
-	w.writeNameList(msg.compressionAlgorithmsCtoS)
-	w.writeNameList(msg.compressionAlgorithmsStoC)
-	w.writeNameList(msg.languagesCtoS)
-	w.writeNameList(msg.languagesStoC)
-	w.writeBoolean(msg.firstKexPacketFollows)
+	w.writeBytes(msg.Cookie[:])
+	w.writeNameList(msg.KexAlgs)
+	w.writeNameList(msg.ServerHostKeyAlgs)
+	w.writeNameList(msg.EncryptionAlgsCtoS)
+	w.writeNameList(msg.EncryptionAlgsStoC)
+	w.writeNameList(msg.MacAlgsCtoS)
+	w.writeNameList(msg.MacAlgsStoC)
+	w.writeNameList(msg.CompressionAlgsCtoS)
+	w.writeNameList(msg.CompressionAlgsStoC)
+	w.writeNameList(msg.LanguagesCtoS)
+	w.writeNameList(msg.LanguagesStoC)
+	w.writeBoolean(msg.FirstKexPacketFollows)
 
 	// future extension
 	w.writeUint32(0)
@@ -343,6 +382,16 @@ func decodeEd25519Sig(r io.Reader) ([]byte, error) {
 
 	sig := rr.readString()
 	return sig, nil
+}
+
+func readMessage(conn io.Reader) (raw []byte, msg any, err error) {
+	raw, err = readPacket(conn)
+	if err != nil {
+		return raw, nil, err
+	}
+	
+	r := NewReader(bytes.NewReader(raw))
+	
 }
 
 func readPacket(conn io.Reader) ([]byte, error) {

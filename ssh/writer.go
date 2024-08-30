@@ -82,36 +82,34 @@ func (w *writer) writeMpint(v *big.Int) {
 	buf := v.Bytes()
 
 	if len(buf) > 0 {
+		// if MSB of first byte is set, add zero padding byte at beginning.
+		if buf[0] & 0x80 != 0 {
+			buf = slices.Insert(buf, 0, 0)
+		}
+		
 		if v.Sign() == -1 {
-			// Two's complement
-			carry := true
-			for i := len(buf) - 1; i >= 0; i-- {
-				b := buf[i]
-				b = ^b
-
-				if carry {
-					b++
-				}
-				if b != 0 {
-					carry = false
-				}
-
-				buf[i] = b
-			}
-
-			// if MSB of first byte is not 1, add 255 padding byte at beginning.
-			if buf[0]>>7 != 1 {
-				buf = slices.Insert(buf, 0, 255)
-			}
-		} else {
-			// if MSB of first byte is set, add zero padding byte at beginning.
-			if buf[0]>>7 == 1 {
-				buf = slices.Insert(buf, 0, 0)
-			}
+			twosComplement(buf)
 		}
 	}
 
 	w.writeString(buf)
+}
+
+func twosComplement(buf []byte) {
+	carry := true
+	for i := len(buf) - 1; i >= 0; i-- {
+		b := buf[i]
+		b = ^b
+
+		if carry {
+			b++
+		}
+		if b != 0 {
+			carry = false
+		}
+
+		buf[i] = b
+	}
 }
 
 func (w *writer) copyN(r io.Reader, n int64) {

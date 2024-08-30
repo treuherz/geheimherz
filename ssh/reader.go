@@ -3,6 +3,7 @@ package ssh
 import (
 	"bytes"
 	"io"
+	"math/big"
 	"strings"
 )
 
@@ -36,11 +37,49 @@ func (r *reader) readUint32() uint32 {
 	raw := make([]byte, 4)
 	_ = r.read(raw)
 
-	v := uint32(raw[0])<<24 |
-		uint32(raw[1])<<16 |
+	v := uint32(raw[0])<<8*3 |
+		uint32(raw[1])<<8*2 |
 		uint32(raw[2])<<8 |
 		uint32(raw[3])
 	return v
+}
+
+func (r *reader) readUint64() uint64 {
+	raw := make([]byte, 8)
+	_ = r.read(raw)
+
+	v := uint64(raw[0])<<8*7 |
+		uint64(raw[1])<<8*6 |
+		uint64(raw[2])<<8*5 |
+		uint64(raw[3])<<8*4 |
+		uint64(raw[4])<<8*3 |
+		uint64(raw[5])<<8*2 |
+		uint64(raw[6])<<8*1 |
+		uint64(raw[7])
+
+	return v
+}
+
+func (r *reader) readMpint() *big.Int {
+	length := r.readUint32()
+	raw := make([]byte, length)
+	_ = r.read(raw)
+
+	i := new(big.Int)
+	if len(raw) > 0 {
+		sign := 1
+		if raw[0]&0x80 != 0 {
+			sign = -1
+			twosComplement(raw)
+		}
+
+		i.SetBytes(raw)
+		if sign == -1 {
+			i.Neg(i)
+		}
+	}
+
+	return i
 }
 
 func (r *reader) readByte() byte {
